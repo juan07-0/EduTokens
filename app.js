@@ -1,21 +1,38 @@
 /**
  * ============================================================================
  * EDUTOKEN LMS - CORE APPLICATION SCRIPT (app.js)
- * Arquitectura SPA (Single Page Application) - Manejo estricto de errores DB
+ * Arquitectura SPA con Sistema Anti-Saturación y Bloqueo de Intentos.
  * ============================================================================
  */
 
 // ==========================================
-// 1. CONFIGURACIÓN Y CONEXIÓN A BASE DE DATOS
+// CONFIGURACIÓN GLOBAL
 // ==========================================
 const SUPABASE_URL = 'https://nrzigtuwwtvsnuaoiwsc.supabase.co'; 
 const SUPABASE_ANON_KEY = 'sb_publishable_ojR7q5-vOsEiZ4nrWzkxTQ_s6CyVHP8'; 
 const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// ⚙️ TÚ DECIDES: ¿Cuántos intentos máximos tienen los estudiantes?
+const MAX_INTENTOS = 2; 
+
 window.app = {};
 
 // ==========================================
-// 2. ENRUTADOR (SPA VIEWS) Y SESIONES
+// MODO OSCURO (DARK MODE)
+// ==========================================
+app.toggleDarkMode = function() {
+    document.body.classList.toggle('dark-mode');
+    const isDark = document.body.classList.contains('dark-mode');
+    localStorage.setItem('edutoken_dark_mode', isDark);
+    if(window.renderCharts) window.renderCharts();
+};
+
+if(localStorage.getItem('edutoken_dark_mode') === 'true') {
+    document.body.classList.add('dark-mode');
+}
+
+// ==========================================
+// ENRUTADOR (SPA VIEWS) Y SESIONES
 // ==========================================
 const views = {
     studentLogin: document.getElementById('view-student-login'),
@@ -43,37 +60,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const studentSession = JSON.parse(sessionStorage.getItem('lms_student_session'));
     const staffSession = JSON.parse(sessionStorage.getItem('lms_staff_session'));
 
-    if (staffSession) {
-        initStaffDashboard(staffSession);
-    } else if (studentSession) {
-        initStudentDashboard(studentSession);
-    } else {
-        views.studentLogin.style.display = 'flex';
-        views.studentLogin.classList.add('active');
-    }
+    if (staffSession) { initStaffDashboard(staffSession); } 
+    else if (studentSession) { initStudentDashboard(studentSession); } 
+    else { views.studentLogin.style.display = 'flex'; views.studentLogin.classList.add('active'); }
 });
 
 function escapeHtml(str) {
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 
-// ==========================================
-// MODO OSCURO (DARK MODE TOGGLE)
-// ==========================================
-app.toggleDarkMode = function() {
-    document.body.classList.toggle('dark-mode');
-    const isDark = document.body.classList.contains('dark-mode');
-    localStorage.setItem('edutoken_dark_mode', isDark);
-    if(window.renderCharts) window.renderCharts();
-};
-
-if(localStorage.getItem('edutoken_dark_mode') === 'true') {
-    document.body.classList.add('dark-mode');
-}
-
 // ============================================================================
-// MÓDULO ESTUDIANTE: PORTAL, CONTENIDOS Y EXÁMENES
+// MÓDULO ESTUDIANTE: PORTAL, CLASES Y BLOQUEO DE EXÁMENES
 // ============================================================================
+
 let AppState = { grado: 1, periodo: 1, materia: 'Matemáticas', examenActual: null, session: null };
 
 document.getElementById('login-form').addEventListener('submit', async (e) => {
@@ -113,18 +112,15 @@ function initStudentDashboard(sessionData) {
 
 document.getElementById('student-name-display').addEventListener('click', async () => {
     const currentName = AppState.session.apodo || '';
-    const newApodo = prompt('Ingresa cómo quieres que te llamemos en tu portal:', currentName);
+    const newApodo = prompt('Ingresa un apodo para tu portal:', currentName);
     
     if (newApodo !== null && newApodo.trim() !== '') {
         try {
-            const { error } = await supabaseClient.from('estudiantes_llaves').update({ apodo: newApodo.trim() }).eq('id', AppState.session.id);
-            if (error) throw error;
+            await supabaseClient.from('estudiantes_llaves').update({ apodo: newApodo.trim() }).eq('id', AppState.session.id);
             AppState.session.apodo = newApodo.trim();
             sessionStorage.setItem('lms_student_session', JSON.stringify(AppState.session));
             document.getElementById('student-name-display').textContent = `Hola, ${newApodo.trim()}`;
-        } catch (error) {
-            alert('Hubo un error de conexión al guardar tu apodo.');
-        }
+        } catch (error) { alert('Error al guardar tu apodo.'); }
     }
 });
 
@@ -154,13 +150,16 @@ async function fetchModuleData() {
     container.style.display = 'none';
     
     try {
-        const [contentRes, examRes] = await Promise.all([
+        // Obtenemos las clases, el examen Y verificamos cuántas veces ha hecho este examen
+        const [contentRes, examRes, intentosRes] = await Promise.all([
             supabaseClient.from('materias_contenido').select('*').eq('grado', AppState.grado).eq('periodo', AppState.periodo).eq('materia', AppState.materia).order('created_at', { ascending: true }),
-            supabaseClient.from('examenes').select('*').eq('grado', AppState.grado).eq('periodo', AppState.periodo).eq('materia', AppState.materia).maybeSingle()
+            supabaseClient.from('examenes').select('*').eq('grado', AppState.grado).eq('periodo', AppState.periodo).eq('materia', AppState.materia).maybeSingle(),
+            supabaseClient.from('calificaciones').select('id, nota').eq('estudiante_token', AppState.session.token).eq('grado', AppState.grado).eq('periodo', AppState.periodo).eq('materia', AppState.materia)
         ]);
         
         const lessonsWrapper = document.getElementById('lessons-wrapper');
         
+        // 1. RENDERIZAR CLASES
         if (contentRes.data && contentRes.data.length > 0) {
             let htmlClases = '';
             contentRes.data.forEach((tema, idx) => {
@@ -179,33 +178,64 @@ async function fetchModuleData() {
             lessonsWrapper.innerHTML = '<section class="lesson-section card"><p class="text-muted">El docente aún no ha publicado contenido en esta unidad.</p></section>';
         }
 
+        // 2. RENDERIZAR EXAMEN Y CONTROLAR INTENTOS
         const examContainer = document.getElementById('exam-container');
+        const cantidadIntentos = intentosRes.data ? intentosRes.data.length : 0;
+        
         if (examRes.data && examRes.data.preguntas_json && examRes.data.preguntas_json.length > 0) {
             document.querySelector('.exam-section').style.display = 'block';
             AppState.examenActual = examRes.data.preguntas_json;
-            let html = `<form id="exam-form">`;
             
-            AppState.examenActual.forEach((item, index) => {
-                html += `
-                    <div class="question-block" style="background: var(--bg-main); padding: 1.5rem; border-radius: 8px; margin-bottom: 1.5rem; border: 1px solid var(--border-color);">
-                        <p style="font-weight: 600; margin-bottom: 1rem; font-size: 1.05rem;">${index + 1}. ${item.pregunta}</p>
-                        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+            // LÓGICA DE BLOQUEO: Si superó el máximo, NO renderiza las preguntas.
+            if (cantidadIntentos >= MAX_INTENTOS) {
+                // Sacamos la nota más alta que haya sacado
+                const mejorNota = intentosRes.data.reduce((max, obj) => Math.max(max, obj.nota), 0);
+                
+                examContainer.innerHTML = `
+                    <div style="text-align: center; padding: 2rem; background: var(--bg-main); border: 1px dashed var(--border-color); border-radius: 8px;">
+                        <div style="font-size: 3rem; margin-bottom: 1rem;">🔒</div>
+                        <h3 style="color: var(--text-primary); margin-bottom: 0.5rem;">Evaluación Bloqueada</h3>
+                        <p style="color: var(--text-muted); margin-bottom: 1.5rem;">Has agotado tus <strong>${MAX_INTENTOS} intentos</strong> permitidos para esta materia.</p>
+                        <div style="display: inline-block; background: var(--primary-soft); color: var(--primary); padding: 0.5rem 1.5rem; border-radius: 99px; font-weight: bold;">
+                            Tu calificación final registrada es: ${mejorNota.toFixed(1)} / 5.0
+                        </div>
+                    </div>
                 `;
-                item.opciones.forEach((opcion, i) => {
+            } else {
+                // Si aún tiene intentos, mostramos el examen
+                let html = `<form id="exam-form">`;
+                
+                AppState.examenActual.forEach((item, index) => {
                     html += `
-                        <label class="option-label" style="display: flex; gap: 0.75rem; padding: 0.75rem 1rem; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
-                            <input type="radio" name="q${index}" value="${i}" required style="accent-color: var(--primary); transform: scale(1.2);"> 
-                            <span>${opcion}</span>
-                        </label>`;
+                        <div class="question-block" style="background: var(--bg-main); padding: 1.5rem; border-radius: 8px; margin-bottom: 1.5rem; border: 1px solid var(--border-color);">
+                            <p style="font-weight: 600; margin-bottom: 1rem; font-size: 1.05rem;">${index + 1}. ${item.pregunta}</p>
+                            <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                    `;
+                    item.opciones.forEach((opcion, i) => {
+                        html += `
+                            <label class="option-label" style="display: flex; gap: 0.75rem; padding: 0.75rem 1rem; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;">
+                                <input type="radio" name="q${index}" value="${i}" required style="accent-color: var(--primary); transform: scale(1.2);"> 
+                                <span>${opcion}</span>
+                            </label>`;
+                    });
+                    html += `</div></div>`;
                 });
-                html += `</div></div>`;
-            });
-            html += `
-                <button type="submit" class="btn btn--primary" style="font-size: 1.05rem; padding: 1rem;">Calificar Evaluación Final</button>
-                <div id="exam-feedback" class="exam-result" style="display:none; margin-top: 1.5rem; padding: 1.5rem; border-radius: 8px; text-align: center; font-weight: bold; font-size: 1.1rem;"></div>
-            </form>`;
-            examContainer.innerHTML = html;
-            document.getElementById('exam-form').addEventListener('submit', handleExamSubmit);
+                
+                // Botón dinámico según el intento
+                const textoBoton = cantidadIntentos === (MAX_INTENTOS - 1) 
+                    ? `Calificar Examen (Último Intento ⚠️)` 
+                    : `Calificar Examen (Intento ${cantidadIntentos + 1} de ${MAX_INTENTOS})`;
+                    
+                const colorBoton = cantidadIntentos === (MAX_INTENTOS - 1) ? 'background: #f59e0b; color: white;' : '';
+
+                html += `
+                    <button type="submit" class="btn btn--primary" style="font-size: 1.05rem; padding: 1rem; ${colorBoton}">${textoBoton}</button>
+                    <div id="exam-feedback" class="exam-result" style="display:none; margin-top: 1.5rem; padding: 1.5rem; border-radius: 8px; text-align: center; font-weight: bold; font-size: 1.1rem;"></div>
+                </form>`;
+                
+                examContainer.innerHTML = html;
+                document.getElementById('exam-form').addEventListener('submit', handleExamSubmit);
+            }
         } else {
             document.querySelector('.exam-section').style.display = 'none';
             examContainer.innerHTML = '';
@@ -231,7 +261,7 @@ async function handleExamSubmit(e) {
     const isApproved = grade >= 3.0; 
     
     submitBtn.disabled = true;
-    submitBtn.textContent = 'Guardando calificación...';
+    submitBtn.textContent = 'Enviando y bloqueando sistema...';
     
     try {
         const { error } = await supabaseClient.from('calificaciones').insert([{
@@ -258,11 +288,15 @@ async function handleExamSubmit(e) {
         feedback.style.color = isApproved ? 'var(--success)' : 'var(--error)';
         feedback.style.border = `1px solid ${isApproved ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`;
         feedback.textContent = isApproved 
-            ? `¡Aprobado! Tu nota es: ${grade} / 5.0 (${correctAnswers}/${totalQuestions}). Enviada al docente.`
-            : `Necesitas mejorar. Tu nota es: ${grade} / 5.0 (${correctAnswers}/${totalQuestions}). Enviada al docente.`;
+            ? `¡Aprobado! Tu nota es: ${grade} / 5.0. Intento Registrado.`
+            : `Necesitas mejorar. Tu nota es: ${grade} / 5.0. Intento Registrado.`;
 
         e.target.querySelectorAll('input[type="radio"]').forEach(radio => radio.disabled = true);
         submitBtn.textContent = 'Examen Finalizado';
+        
+        // Refrescamos la vista a los 3 segundos para que vea el candado 🔒
+        setTimeout(() => fetchModuleData(), 3500);
+
     } catch (err) {
         alert("Hubo un error de conexión al guardar tu nota. Revisa tu internet.");
         submitBtn.disabled = false; submitBtn.textContent = 'Reintentar Guardar';
@@ -290,14 +324,7 @@ document.getElementById('staff-login-form').addEventListener('submit', async (e)
         const { data, error } = await supabaseClient.from('personal_institucional').select('*').eq('pin', pin).maybeSingle();
         if (error || !data) throw new Error('PIN incorrecto o acceso denegado.');
 
-        const userRole = {
-            id: data.id,
-            name: data.nombre,
-            role: data.rol,
-            canPublish: data.rol === 'admin',
-            canManageStaff: data.rol === 'admin'
-        };
-
+        const userRole = { id: data.id, name: data.nombre, role: data.rol, canPublish: data.rol === 'admin', canManageStaff: data.rol === 'admin' };
         sessionStorage.setItem('lms_staff_session', JSON.stringify(userRole));
         initStaffDashboard(userRole);
     } catch (err) {
@@ -340,9 +367,7 @@ app.copyToClipboard = async function(text, btnElement) {
         const originalIcon = btnElement.innerHTML;
         btnElement.innerHTML = '✅';
         setTimeout(() => { btnElement.innerHTML = originalIcon; }, 1500);
-    } catch (err) {
-        console.error("No se pudo copiar", err);
-    }
+    } catch (err) { console.error("No se pudo copiar", err); }
 };
 
 // ==========================================
@@ -431,11 +456,8 @@ function resetAdminForm() {
     document.getElementById('admin-form').reset();
     document.getElementById('edit-student-id').value = "";
     document.getElementById('admin-form-title').innerHTML = `Generador de Llaves`;
-    
     const btn = document.getElementById('btn-generate');
-    btn.textContent = "Generar";
-    btn.style.background = "var(--primary)";
-    
+    btn.textContent = "Generar"; btn.style.background = "var(--primary)";
     document.getElementById('btn-cancel-student-edit').style.display = "none";
 }
 
@@ -454,21 +476,15 @@ document.getElementById('admin-form').addEventListener('submit', async (e) => {
         if (isEdit) {
             const { error } = await supabaseClient.from('estudiantes_llaves').update({ nombre_estudiante: nombre, grado: grado }).eq('id', id);
             if (error) throw error;
-            alertBox.className = 'alert alert--success';
-            alertBox.textContent = `¡Información de ${nombre} actualizada!`;
-            alertBox.style.display = 'block';
+            alertBox.className = 'alert alert--success'; alertBox.textContent = `¡Información actualizada!`; alertBox.style.display = 'block';
             resetAdminForm();
         } else {
             const token = `EST-G${grado.padStart(2,'0')}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
             const { error } = await supabaseClient.from('estudiantes_llaves').insert([{ token: token, nombre_estudiante: nombre, grado: grado, estado: true }]);
             if (error) throw error;
-            
             let copiado = false;
             try { await navigator.clipboard.writeText(token); copiado = true; } catch (err) {}
-            
-            alertBox.className = 'alert alert--success';
-            alertBox.textContent = copiado ? `¡Llave guardada y COPIADA! Token: ${token}` : `¡Llave guardada! Token: ${token}`;
-            alertBox.style.display = 'block';
+            alertBox.className = 'alert alert--success'; alertBox.textContent = copiado ? `¡Llave guardada y COPIADA! Token: ${token}` : `¡Llave guardada! Token: ${token}`; alertBox.style.display = 'block';
             document.getElementById('admin-form').reset();
         }
         loadRecentTokens();
@@ -481,16 +497,13 @@ document.getElementById('admin-form').addEventListener('submit', async (e) => {
 
 app.deleteToken = async function(id, token, nombre) {
     const confirmacion = prompt(`⚠️ Vas a eliminar definitivamente al estudiante ${nombre}.\n\nPara confirmar, debes escribir o pegar su llave exacta:\n${token}`);
-    
     if (confirmacion === token) {
         try {
             const { error } = await supabaseClient.from('estudiantes_llaves').delete().eq('id', id);
             if (error) throw error;
             alert(`✅ El estudiante ${nombre} ha sido eliminado.`);
             loadRecentTokens();
-        } catch(e) {
-            alert('Error DB: ' + e.message);
-        }
+        } catch(e) { alert('Error DB: ' + e.message); }
     } else if (confirmacion !== null) {
         alert('❌ La llave ingresada no coincide. Operación cancelada.');
     }
@@ -515,9 +528,7 @@ document.getElementById('filter-form').addEventListener('submit', async (e) => {
     
     try {
         const { data } = await supabaseClient.from('calificaciones').select('*')
-            .eq('grado', document.getElementById('filter-grade').value)
-            .eq('periodo', document.getElementById('filter-period').value)
-            .eq('materia', document.getElementById('filter-subject').value)
+            .eq('grado', document.getElementById('filter-grade').value).eq('periodo', document.getElementById('filter-period').value).eq('materia', document.getElementById('filter-subject').value)
             .order('nota', { ascending: false });
 
         currentDataExport = data || [];
@@ -528,13 +539,11 @@ document.getElementById('filter-form').addEventListener('submit', async (e) => {
             document.getElementById('charts-wrapper').style.display = 'grid';
         } else {
             document.getElementById('btn-export').style.display = 'none';
-            gradesSearchInput.disabled = true;
-            gradesSearchInput.value = '';
+            gradesSearchInput.disabled = true; gradesSearchInput.value = '';
             document.getElementById('charts-wrapper').style.display = 'none';
         }
 
         renderFilteredGrades();
-        
     } finally {
         btn.disabled = false; btn.textContent = 'Cargar Notas';
     }
@@ -542,26 +551,19 @@ document.getElementById('filter-form').addEventListener('submit', async (e) => {
 
 gradesSearchInput.addEventListener('input', renderFilteredGrades);
 
-window.renderCharts = function() {
-    renderFilteredGrades(); 
-};
+window.renderCharts = function() { renderFilteredGrades(); };
 
 function renderFilteredGrades() {
     const tbody = document.getElementById('grades-tbody');
     const query = gradesSearchInput.value.toLowerCase().trim();
     
-    const filtered = currentDataExport.filter(r => 
-        r.nombre_estudiante.toLowerCase().includes(query) || 
-        r.estudiante_token.toLowerCase().includes(query)
-    );
+    const filtered = currentDataExport.filter(r => r.nombre_estudiante.toLowerCase().includes(query) || r.estudiante_token.toLowerCase().includes(query));
 
     const avgEl = document.getElementById('average-grade-count');
     if (filtered.length > 0) {
         const sum = filtered.reduce((acc, curr) => acc + parseFloat(curr.nota), 0);
         avgEl.textContent = (sum / filtered.length).toFixed(1);
-    } else {
-        avgEl.textContent = '0.0';
-    }
+    } else { avgEl.textContent = '0.0'; }
 
     if (filtered.length > 0) {
         let aprobados = 0; let reprobados = 0;
@@ -570,12 +572,7 @@ function renderFilteredGrades() {
         filtered.forEach(r => {
             const n = parseFloat(r.nota);
             if(n >= 3.0) aprobados++; else reprobados++;
-            
-            if(n <= 1.0) distribucion[0]++;
-            else if(n <= 2.0) distribucion[1]++;
-            else if(n <= 3.0) distribucion[2]++;
-            else if(n <= 4.0) distribucion[3]++;
-            else distribucion[4]++;
+            if(n <= 1.0) distribucion[0]++; else if(n <= 2.0) distribucion[1]++; else if(n <= 3.0) distribucion[2]++; else if(n <= 4.0) distribucion[3]++; else distribucion[4]++;
         });
 
         const isDark = document.body.classList.contains('dark-mode');
@@ -614,15 +611,12 @@ function renderFilteredGrades() {
 
 document.getElementById('btn-export').addEventListener('click', () => {
     if(currentDataExport.length === 0) return;
-    
     let csv = "\uFEFFEstudiante;Token;Nota;Correctas;Total;Fecha\n";
-    
     currentDataExport.forEach(r => {
         const nombreLimpio = r.nombre_estudiante.replace(/;/g, ''); 
         const fecha = new Date(r.created_at).toLocaleDateString('es-CO');
         csv += `${nombreLimpio};${r.estudiante_token};${r.nota};${r.respuestas_correctas};${r.total_preguntas};${fecha}\n`;
     });
-    
     const link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
     link.download = `Notas_G${document.getElementById('filter-grade').value}_${document.getElementById('filter-subject').value}.csv`;
@@ -641,26 +635,19 @@ function createQuestionBlock(data = null) {
     div.style.cssText = "background: var(--bg-main); padding: 1.5rem; margin-bottom: 1rem; border: 1px solid var(--border-color); border-radius: 8px; position: relative;";
     
     const qText = data ? data.pregunta : '';
-    const op0 = data ? data.opciones[0] : '';
-    const op1 = data ? data.opciones[1] : '';
-    const op2 = data ? data.opciones[2] : '';
-    const op3 = data ? data.opciones[3] : '';
+    const op0 = data ? data.opciones[0] : ''; const op1 = data ? data.opciones[1] : ''; const op2 = data ? data.opciones[2] : ''; const op3 = data ? data.opciones[3] : '';
     const correct = data ? data.respuesta_correcta : 0;
 
     div.innerHTML = `
         <button type="button" class="btn-remove-q" style="position: absolute; top: 10px; right: 15px; background: none; border: none; color: var(--error); font-weight: bold; cursor: pointer; font-size: 0.9rem;">✕ Quitar</button>
         <input type="text" class="form-input q-text" placeholder="Escribe la pregunta aquí..." value="${escapeHtml(qText)}" style="margin-bottom: 1rem; font-weight: 600; padding-right: 4rem;" required>
         <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.75rem; margin-bottom:1rem;">
-            <input type="text" class="form-input q-opt0" placeholder="Opción A" value="${escapeHtml(op0)}" required>
-            <input type="text" class="form-input q-opt1" placeholder="Opción B" value="${escapeHtml(op1)}" required>
-            <input type="text" class="form-input q-opt2" placeholder="Opción C" value="${escapeHtml(op2)}" required>
-            <input type="text" class="form-input q-opt3" placeholder="Opción D" value="${escapeHtml(op3)}" required>
+            <input type="text" class="form-input q-opt0" placeholder="Opción A" value="${escapeHtml(op0)}" required><input type="text" class="form-input q-opt1" placeholder="Opción B" value="${escapeHtml(op1)}" required>
+            <input type="text" class="form-input q-opt2" placeholder="Opción C" value="${escapeHtml(op2)}" required><input type="text" class="form-input q-opt3" placeholder="Opción D" value="${escapeHtml(op3)}" required>
         </div>
         <select class="form-select q-correct" style="border-color: var(--success); color: var(--success); font-weight: 600;" required>
-            <option value="0" ${correct === 0 ? 'selected' : ''}>Respuesta Correcta: Opción A</option>
-            <option value="1" ${correct === 1 ? 'selected' : ''}>Respuesta Correcta: Opción B</option>
-            <option value="2" ${correct === 2 ? 'selected' : ''}>Respuesta Correcta: Opción C</option>
-            <option value="3" ${correct === 3 ? 'selected' : ''}>Respuesta Correcta: Opción D</option>
+            <option value="0" ${correct === 0 ? 'selected' : ''}>Respuesta Correcta: Opción A</option><option value="1" ${correct === 1 ? 'selected' : ''}>Respuesta Correcta: Opción B</option>
+            <option value="2" ${correct === 2 ? 'selected' : ''}>Respuesta Correcta: Opción C</option><option value="3" ${correct === 3 ? 'selected' : ''}>Respuesta Correcta: Opción D</option>
         </select>`;
         
     div.querySelector('.btn-remove-q').addEventListener('click', () => { div.remove(); });
@@ -673,19 +660,11 @@ document.getElementById('publish-form').addEventListener('submit', async (e) => 
     e.preventDefault();
     const btn = document.getElementById('btn-submit-publish'); 
     const alertBox = document.getElementById('publish-alert');
-    btn.disabled = true; btn.textContent = "Guardando...";
-    alertBox.style.display = 'none';
+    btn.disabled = true; btn.textContent = "Guardando..."; alertBox.style.display = 'none';
     
     const editId = document.getElementById('edit-content-id').value;
-    
-    const baseData = {
-        grado: document.getElementById('pub-grade').value,
-        periodo: document.getElementById('pub-period').value,
-        materia: document.getElementById('pub-subject').value
-    };
-    
-    const tituloTema = document.getElementById('pub-title').value;
-    const contenidoHtml = document.getElementById('pub-html').value;
+    const baseData = { grado: document.getElementById('pub-grade').value, periodo: document.getElementById('pub-period').value, materia: document.getElementById('pub-subject').value };
+    const tituloTema = document.getElementById('pub-title').value; const contenidoHtml = document.getElementById('pub-html').value;
 
     const preguntasJson = Array.from(document.querySelectorAll('#questions-container > div')).map(block => ({
         pregunta: block.querySelector('.q-text').value.trim(),
@@ -707,37 +686,26 @@ document.getElementById('publish-form').addEventListener('submit', async (e) => 
             if (examError) throw examError;
         }
 
-        alertBox.className = 'alert alert--success'; 
-        alertBox.textContent = '¡Clase guardada exitosamente!'; 
-        alertBox.style.display = 'block';
-        
-        resetPublishForm();
-        loadPublishedContent(); 
+        alertBox.className = 'alert alert--success'; alertBox.textContent = '¡Clase guardada exitosamente!'; alertBox.style.display = 'block';
+        resetPublishForm(); loadPublishedContent(); 
     } catch (error) { 
         console.error("Detalle de Error de Supabase:", error);
-        alertBox.className = 'alert alert--error'; 
-        // ¡Magia! Ahora nos mostrará en pantalla qué bloqueó la base de datos.
-        alertBox.textContent = 'Error DB: ' + (error.message || 'Desconocido'); 
-        alertBox.style.display = 'block'; 
+        alertBox.className = 'alert alert--error'; alertBox.textContent = 'Error DB: ' + (error.message || 'Desconocido'); alertBox.style.display = 'block'; 
     } finally {
-        btn.disabled = false;
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        btn.disabled = false; window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 });
 
 async function loadPublishedContent() {
     const { data, error } = await supabaseClient.from('materias_contenido').select('*').order('created_at', { ascending: false });
     if (error) return;
-    
     globalPublishedContent = data || [];
     renderFilteredContent();
 }
 
 function renderFilteredContent() {
     const tbody = document.getElementById('published-content-tbody');
-    const filterGrade = document.getElementById('filter-manager-grade').value;
-    const filterPeriod = document.getElementById('filter-manager-period').value;
-    const filterSubject = document.getElementById('filter-manager-subject').value;
+    const filterGrade = document.getElementById('filter-manager-grade').value; const filterPeriod = document.getElementById('filter-manager-period').value; const filterSubject = document.getElementById('filter-manager-subject').value;
 
     const filteredData = globalPublishedContent.filter(row => {
         const matchGrade = filterGrade === "" || row.grado == filterGrade;
@@ -758,17 +726,11 @@ function renderFilteredContent() {
                 <span class="badge-grade" style="margin-top:0.5rem; display:inline-block; font-size: 0.8rem;">${escapeHtml(row.materia)}</span>
             </td>
             <td>Grado ${row.grado}°<br><small style="color: var(--text-muted);">Periodo ${row.periodo}</small></td>
-            <td style="font-size: 0.85rem; color: var(--text-muted);">
-                ${new Date(row.created_at).toLocaleDateString('es-CO')}
-            </td>
+            <td style="font-size: 0.85rem; color: var(--text-muted);">${new Date(row.created_at).toLocaleDateString('es-CO')}</td>
             <td style="text-align: right;">
                 <div style="display: flex; gap: 0.5rem; justify-content: flex-end;">
-                    <button onclick="app.editContent('${row.id}')" class="btn btn--sm btn--outline" style="color: var(--primary); border-color: var(--primary); padding: 0.4rem 0.6rem;">
-                        ✏️ Editar
-                    </button>
-                    <button onclick="app.deleteContent('${row.id}', '${escapeHtml(row.titulo_tema)}')" class="btn btn--sm btn--outline" style="color: var(--error); border-color: rgba(239,68,68,0.3); background: var(--error-bg); padding: 0.4rem 0.6rem;">
-                        🗑️
-                    </button>
+                    <button onclick="app.editContent('${row.id}')" class="btn btn--sm btn--outline" style="color: var(--primary); border-color: var(--primary); padding: 0.4rem 0.6rem;">✏️ Editar</button>
+                    <button onclick="app.deleteContent('${row.id}', '${escapeHtml(row.titulo_tema)}')" class="btn btn--sm btn--outline" style="color: var(--error); border-color: rgba(239,68,68,0.3); background: var(--error-bg); padding: 0.4rem 0.6rem;">🗑️</button>
                 </div>
             </td>
         </tr>`).join('');
@@ -777,11 +739,8 @@ function renderFilteredContent() {
 document.getElementById('filter-manager-grade').addEventListener('change', renderFilteredContent);
 document.getElementById('filter-manager-period').addEventListener('change', renderFilteredContent);
 document.getElementById('filter-manager-subject').addEventListener('change', renderFilteredContent);
-
 document.getElementById('btn-clear-filters').addEventListener('click', () => {
-    document.getElementById('filter-manager-grade').value = "";
-    document.getElementById('filter-manager-period').value = "";
-    document.getElementById('filter-manager-subject').value = "";
+    document.getElementById('filter-manager-grade').value = ""; document.getElementById('filter-manager-period').value = ""; document.getElementById('filter-manager-subject').value = "";
     renderFilteredContent();
 });
 
@@ -790,46 +749,27 @@ app.editContent = async function(id) {
     if(!item) return;
 
     document.getElementById('edit-content-id').value = item.id;
-    document.getElementById('pub-grade').value = item.grado;
-    document.getElementById('pub-period').value = item.periodo;
-    document.getElementById('pub-subject').value = item.materia;
-    document.getElementById('pub-title').value = item.titulo_tema;
-    document.getElementById('pub-html').value = item.contenido_html;
+    document.getElementById('pub-grade').value = item.grado; document.getElementById('pub-period').value = item.periodo; document.getElementById('pub-subject').value = item.materia; document.getElementById('pub-title').value = item.titulo_tema; document.getElementById('pub-html').value = item.contenido_html;
 
-    document.getElementById('questions-container').innerHTML = ''; 
-    questionCount = 0; 
+    document.getElementById('questions-container').innerHTML = ''; questionCount = 0; 
     
     const { data: examData } = await supabaseClient.from('examenes').select('*').match({grado: item.grado, periodo: item.periodo, materia: item.materia}).maybeSingle();
 
     if (examData && examData.preguntas_json) {
-        examData.preguntas_json.forEach(q => {
-           createQuestionBlock(q); 
-        });
+        examData.preguntas_json.forEach(q => { createQuestionBlock(q); });
     }
 
     document.getElementById('publish-form-title').innerHTML = `✏️ Editando: ${item.titulo_tema}`;
-    const btn = document.getElementById('btn-submit-publish');
-    btn.textContent = "Actualizar Clase";
-    btn.style.background = "var(--success)";
-    
-    document.getElementById('btn-cancel-edit').style.display = "block";
-
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    const btn = document.getElementById('btn-submit-publish'); btn.textContent = "Actualizar Clase"; btn.style.background = "var(--success)";
+    document.getElementById('btn-cancel-edit').style.display = "block"; window.scrollTo({ top: 0, behavior: 'smooth' });
 };
 
 document.getElementById('btn-cancel-edit').addEventListener('click', resetPublishForm);
 
 function resetPublishForm() {
-    document.getElementById('publish-form').reset();
-    document.getElementById('edit-content-id').value = "";
-    document.getElementById('questions-container').innerHTML = ''; 
-    questionCount = 0;
-    
+    document.getElementById('publish-form').reset(); document.getElementById('edit-content-id').value = ""; document.getElementById('questions-container').innerHTML = ''; questionCount = 0;
     document.getElementById('publish-form-title').innerHTML = `Publicador de Contenido`;
-    const btn = document.getElementById('btn-submit-publish');
-    btn.textContent = "Publicar Clase";
-    btn.style.background = "var(--primary)";
-    
+    const btn = document.getElementById('btn-submit-publish'); btn.textContent = "Publicar Clase"; btn.style.background = "var(--primary)";
     document.getElementById('btn-cancel-edit').style.display = "none";
 }
 
@@ -837,32 +777,24 @@ app.deleteContent = async function(id, titulo) {
     if(confirm(`⚠️ ¿Seguro de borrar la clase "${titulo}"? El examen final del periodo NO se borrará.`)) {
         const { error } = await supabaseClient.from('materias_contenido').delete().eq('id', id);
         if (error) { alert('Error: ' + error.message); return; }
-        alert('Eliminado exitosamente.');
-        loadPublishedContent();
+        alert('Eliminado exitosamente.'); loadPublishedContent();
     }
 };
 
 // ==========================================
-// SUB-MÓDULO: GESTIÓN DE PERSONAL (FILTROS Y SEGURIDAD)
+// SUB-MÓDULO: GESTIÓN DE PERSONAL
 // ==========================================
-let globalStaff = [];
-let currentStaffUser = null; 
+let globalStaff = []; let currentStaffUser = null; 
 
 async function loadPersonal() {
     const { data } = await supabaseClient.from('personal_institucional').select('*').order('created_at', { ascending: true });
-    globalStaff = data || [];
-    renderFilteredStaff();
+    globalStaff = data || []; renderFilteredStaff();
 }
 
 function renderFilteredStaff() {
-    const tbody = document.getElementById('personal-tbody');
-    const query = document.getElementById('search-staff').value.toLowerCase().trim();
-    const filterRole = document.getElementById('filter-staff-role').value;
-    
+    const tbody = document.getElementById('personal-tbody'); const query = document.getElementById('search-staff').value.toLowerCase().trim(); const filterRole = document.getElementById('filter-staff-role').value;
     const sessionData = sessionStorage.getItem('lms_staff_session');
-    if(sessionData) {
-        currentStaffUser = JSON.parse(sessionData);
-    }
+    if(sessionData) { currentStaffUser = JSON.parse(sessionData); }
 
     const filtered = globalStaff.filter(row => {
         const matchQuery = row.nombre.toLowerCase().includes(query) || row.pin.toLowerCase().includes(query);
@@ -875,38 +807,14 @@ function renderFilteredStaff() {
     tbody.innerHTML = (filtered.length === 0) 
         ? '<tr><td colspan="4" style="text-align:center; color: var(--text-muted); padding: 2rem;">No se encontró personal con esos filtros.</td></tr>' 
         : filtered.map(row => {
-            const rolBadge = row.rol === 'admin' 
-                ? '<span class="brand-badge" style="background: var(--primary-soft); color: var(--primary);">Administrador</span>' 
-                : '<span class="brand-badge" style="background: var(--success-bg); color: var(--success);">Docente</span>';
-
-            const isRowSuperAdmin = row.nombre.includes('Juan Ortiz');
-            const isCurrentUserSuperAdmin = currentStaffUser && currentStaffUser.name.includes('Juan Ortiz');
-            const isOwnRecord = currentStaffUser && currentStaffUser.id === row.id;
-            const isCurrentUserAdmin = currentStaffUser && currentStaffUser.role === 'admin';
-
-            let pinVisible = '****';
-            let showCopyButton = false;
-
-            if (isRowSuperAdmin) {
-                if (isOwnRecord) {
-                    pinVisible = row.pin;
-                    showCopyButton = true;
-                }
-            } else {
-                if (isCurrentUserAdmin || isOwnRecord) {
-                    pinVisible = row.pin;
-                    showCopyButton = true;
-                }
-            }
-
+            const rolBadge = row.rol === 'admin' ? '<span class="brand-badge" style="background: var(--primary-soft); color: var(--primary);">Administrador</span>' : '<span class="brand-badge" style="background: var(--success-bg); color: var(--success);">Docente</span>';
+            const isRowSuperAdmin = row.nombre.includes('Juan Ortiz'); const isCurrentUserSuperAdmin = currentStaffUser && currentStaffUser.name.includes('Juan Ortiz'); const isOwnRecord = currentStaffUser && currentStaffUser.id === row.id; const isCurrentUserAdmin = currentStaffUser && currentStaffUser.role === 'admin';
+            let pinVisible = '****'; let showCopyButton = false;
+            if (isRowSuperAdmin) { if (isOwnRecord) { pinVisible = row.pin; showCopyButton = true; } } else { if (isCurrentUserAdmin || isOwnRecord) { pinVisible = row.pin; showCopyButton = true; } }
             let actionButtons = '';
-            
             if (isRowSuperAdmin) {
-                if (isOwnRecord) {
-                     actionButtons = `<button onclick="app.editStaff('${row.id}')" class="btn btn--sm btn--outline" style="color: var(--primary); border-color: var(--primary); padding: 0.4rem 0.6rem;" title="Editar Tus Datos">✏️</button>`;
-                } else {
-                     actionButtons = `<span style="color: var(--text-muted); font-size: 0.85rem; font-weight: bold;">🔒 Intocable</span>`;
-                }
+                if (isOwnRecord) { actionButtons = `<button onclick="app.editStaff('${row.id}')" class="btn btn--sm btn--outline" style="color: var(--primary); border-color: var(--primary); padding: 0.4rem 0.6rem;" title="Editar Tus Datos">✏️</button>`; } 
+                else { actionButtons = `<span style="color: var(--text-muted); font-size: 0.85rem; font-weight: bold;">🔒 Intocable</span>`; }
             } else {
                  if (isCurrentUserAdmin) {
                      actionButtons = `
@@ -936,88 +844,49 @@ document.getElementById('search-staff').addEventListener('input', renderFiltered
 document.getElementById('filter-staff-role').addEventListener('change', renderFilteredStaff);
 
 app.editStaff = function(id) {
-    const staffMember = globalStaff.find(t => t.id === id);
-    if(!staffMember) return;
-    
-    document.getElementById('edit-personal-id').value = staffMember.id;
-    document.getElementById('staff-new-name').value = staffMember.nombre;
-    document.getElementById('staff-new-role').value = staffMember.rol;
-    document.getElementById('staff-new-pin').value = staffMember.pin;
-    
+    const staffMember = globalStaff.find(t => t.id === id); if(!staffMember) return;
+    document.getElementById('edit-personal-id').value = staffMember.id; document.getElementById('staff-new-name').value = staffMember.nombre; document.getElementById('staff-new-role').value = staffMember.rol; document.getElementById('staff-new-pin').value = staffMember.pin;
     document.getElementById('personal-form-title').innerHTML = `✏️ Editando: ${staffMember.nombre}`;
-    const btn = document.getElementById('btn-add-staff');
-    btn.textContent = "Actualizar Info";
-    btn.style.background = "var(--success)";
-    
-    document.getElementById('btn-cancel-personal-edit').style.display = "block";
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    const btn = document.getElementById('btn-add-staff'); btn.textContent = "Actualizar Info"; btn.style.background = "var(--success)";
+    document.getElementById('btn-cancel-personal-edit').style.display = "block"; window.scrollTo({ top: 0, behavior: 'smooth' });
 };
 
 document.getElementById('btn-cancel-personal-edit').addEventListener('click', resetPersonalForm);
 
 function resetPersonalForm() {
-    document.getElementById('personal-form').reset();
-    document.getElementById('edit-personal-id').value = "";
+    document.getElementById('personal-form').reset(); document.getElementById('edit-personal-id').value = "";
     document.getElementById('personal-form-title').innerHTML = `Gestión de Personal Institucional`;
-    
-    const btn = document.getElementById('btn-add-staff');
-    btn.textContent = "Añadir";
-    btn.style.background = "var(--primary)";
-    
+    const btn = document.getElementById('btn-add-staff'); btn.textContent = "Añadir"; btn.style.background = "var(--primary)";
     document.getElementById('btn-cancel-personal-edit').style.display = "none";
 }
 
 document.getElementById('personal-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const btn = document.getElementById('btn-add-staff');
-    btn.disabled = true; btn.textContent = 'Guardando...';
-    
-    const id = document.getElementById('edit-personal-id').value;
-    const isEdit = id !== "";
-    const nombre = document.getElementById('staff-new-name').value.trim();
-    const rol = document.getElementById('staff-new-role').value;
-    const pin = document.getElementById('staff-new-pin').value.trim();
+    const btn = document.getElementById('btn-add-staff'); btn.disabled = true; btn.textContent = 'Guardando...';
+    const id = document.getElementById('edit-personal-id').value; const isEdit = id !== ""; const nombre = document.getElementById('staff-new-name').value.trim(); const rol = document.getElementById('staff-new-role').value; const pin = document.getElementById('staff-new-pin').value.trim();
 
     try {
         if(isEdit) {
              const { error } = await supabaseClient.from('personal_institucional').update({ nombre, rol, pin }).eq('id', id);
              if (error) throw new Error('El PIN ya está en uso o no se pudo actualizar.');
-             
-             if(currentStaffUser && currentStaffUser.id === id) {
-                 currentStaffUser.name = nombre;
-                 sessionStorage.setItem('lms_staff_session', JSON.stringify(currentStaffUser));
-                 initStaffDashboard(currentStaffUser);
-             }
-             
-             alert(`¡Información de ${nombre} actualizada!`);
-             resetPersonalForm();
+             if(currentStaffUser && currentStaffUser.id === id) { currentStaffUser.name = nombre; sessionStorage.setItem('lms_staff_session', JSON.stringify(currentStaffUser)); initStaffDashboard(currentStaffUser); }
+             alert(`¡Información de ${nombre} actualizada!`); resetPersonalForm();
         } else {
             const { error } = await supabaseClient.from('personal_institucional').insert([{ nombre, rol, pin }]);
             if (error) throw new Error('El PIN ya está en uso.');
             document.getElementById('personal-form').reset();
         }
-        
         loadPersonal();
-    } catch (err) {
-        alert(err.message);
-    } finally {
-        btn.disabled = false; btn.textContent = isEdit ? 'Actualizar Info' : 'Añadir';
-    }
+    } catch (err) { alert(err.message); } finally { btn.disabled = false; btn.textContent = isEdit ? 'Actualizar Info' : 'Añadir'; }
 });
 
 app.deleteStaff = async function(id, nombre) {
     const confirmacion = prompt(`⚠️ ATENCIÓN: Estás a punto de eliminar a:\n${nombre}\n\nEscribe ELIMINAR en mayúsculas para confirmar:`);
-    
     if (confirmacion === "ELIMINAR") {
         try {
             const { error } = await supabaseClient.from('personal_institucional').delete().eq('id', id);
             if (error) throw error;
-            alert(`✅ ${nombre} eliminado.`);
-            loadPersonal();
-        } catch (error) {
-            alert('❌ Error al eliminar: ' + error.message);
-        }
-    } else {
-        alert('❌ Cancelado.');
-    }
+            alert(`✅ ${nombre} eliminado.`); loadPersonal();
+        } catch (error) { alert('❌ Error al eliminar: ' + error.message); }
+    } else { alert('❌ Cancelado.'); }
 };
