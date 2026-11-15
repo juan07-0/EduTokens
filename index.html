@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EduToken LMS | Plataforma Educativa</title>
+    <link rel="icon" type="image/png" href="favicon.png.jpg">
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .lesson-body iframe {
+            max-width: 100% !important;
+            height: auto !important;
+            aspect-ratio: 16 / 9;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-top: 1rem;
+        }
+
+        .content-manager-layout {
+            display: grid;
+            grid-template-columns: 260px 1fr;
+            gap: 1.5rem;
+            align-items: start;
+            margin-top: 1rem;
+        }
+        .filter-sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        .filter-card {
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.25rem 1rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+        }
+        .filter-card h4 {
+            color: var(--primary);
+            font-size: 0.9rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            margin-bottom: 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        /* ==========================================================================
+           MODO OSCURO (DARK MODE)
+           ========================================================================== */
+        body { transition: background-color 0.3s, color 0.3s; }
+        
+        body.dark-mode { 
+            --bg-main: #0f172a; 
+            --bg-card: #1e293b; 
+            --text-primary: #f8fafc; 
+            --text-muted: #94a3b8; 
+            --border-color: #334155; 
+            background-color: var(--bg-main); 
+            color: var(--text-primary); 
+        }
+        
+        .dark-mode .card, .dark-mode .filter-card { 
+            background: var(--bg-card); 
+            color: var(--text-primary); 
+            border-color: var(--border-color); 
+            box-shadow: none; 
+        }
+        
+        .dark-mode .form-input, .dark-mode .form-select { 
+            background: #0f172a; 
+            color: white; 
+            border-color: var(--border-color); 
+        }
+        
+        .dark-mode .data-table th { 
+            background: #0f172a; 
+            color: #cbd5e1; 
+            border-bottom-color: var(--border-color); 
+        }
+        
+        .dark-mode .data-table td { border-bottom-color: var(--border-color); }
+        .dark-mode .dashboard-header { background: #0f172a; border-bottom-color: var(--border-color); }
+        .dark-mode .dashboard-sidebar { border-right-color: var(--border-color); background: var(--bg-main); }
+        .dark-mode .lesson-section { background: var(--bg-card); }
+        
+        @media (max-width: 850px) {
+            .content-manager-layout { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- VISTA 1: LOGIN DE ESTUDIANTES -->
+    <main id="view-student-login" class="app-view active auth-wrapper">
+        <section class="card">
+            <header class="card__header">
+                <span class="brand-badge">Portal Educativo</span>
+                <h1 class="card__title">Ingresa con tu Llave</h1>
+                <p class="card__subtitle">Escribe el código único entregado por tu docente.</p>
+            </header>
+            <div id="auth-alert" class="alert"></div>
+            <form id="login-form" autocomplete="off">
+                <div class="form-group">
+                    <input type="text" id="student-token" class="form-input form-input--token" placeholder="EST-G00-XXXX" maxlength="12" required autofocus>
+                </div>
+                <button type="submit" id="btn-submit-login" class="btn btn--primary">Ingresar a mi Portal</button>
+            </form>
+            <footer class="footer-link" style="margin-top: 2rem;">
+                ¿Eres Docente o Administrador? <a href="#" id="link-to-staff">Acceso Institucional</a>
+            </footer>
+        </section>
+    </main>
+
+    <!-- VISTA 2: LOGIN DE DOCENTES / ADMIN -->
+    <main id="view-staff-login" class="app-view auth-wrapper">
+        <section class="card">
+            <header class="card__header">
+                <span class="brand-badge">Acceso Institucional</span>
+                <h1 class="card__title">Panel de Gestión</h1>
+                <p class="card__subtitle">Ingresa tu PIN de seguridad según tu rol.</p>
+            </header>
+            <div id="staff-auth-alert" class="alert"></div>
+            <form id="staff-login-form" autocomplete="off">
+                <div class="form-group">
+                    <input type="password" id="staff-pin" class="form-input form-input--token" placeholder="****" maxlength="8" required>
+                </div>
+                <button type="submit" id="btn-submit-staff" class="btn btn--primary">Desbloquear Panel</button>
+            </form>
+            <footer class="footer-link" style="margin-top: 2rem;">
+                <a href="#" id="link-to-student">← Volver al Portal de Estudiantes</a>
+            </footer>
+        </section>
+    </main>
+
+    <!-- VISTA 3: DASHBOARD DEL ESTUDIANTE -->
+    <div id="view-student-dashboard" class="app-view dashboard-layout">
+        <header class="dashboard-header">
+            <div class="header-brand">
+                <span class="brand-badge">EduToken LMS</span>
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <h1 id="student-name-display" class="header-title" style="cursor: pointer; border-bottom: 1px dashed var(--text-muted);" title="Clic para cambiar apodo">Cargando...</h1>
+                    <span style="font-size: 0.8rem; color: var(--text-muted);">(Clic para apodo)</span>
+                </div>
+            </div>
+            
+            <div class="header-controls" style="display: flex; gap: 1rem; align-items: center;">
+                <button onclick="app.toggleDarkMode()" class="btn btn--outline btn--sm" style="border-radius: 50%; padding: 0.4rem 0.6rem; font-size: 1.1rem; border-color: transparent;" title="Cambiar Tema">🌙</button>
+                <span id="student-grade-display" class="badge-grade">Grado --</span>
+                <button id="btn-logout-student" class="btn btn--outline btn--sm">Salir</button>
+            </div>
+        </header>
+
+        <div class="dashboard-container">
+            <aside class="dashboard-sidebar">
+                <div class="sidebar-section">
+                    <h3 class="sidebar-title">Periodo</h3>
+                    <div class="period-selector" id="period-selector">
+                        <button class="btn-period active" data-period="1">P 1</button>
+                        <button class="btn-period" data-period="2">P 2</button>
+                        <button class="btn-period" data-period="3">P 3</button>
+                    </div>
+                </div>
+                <div class="sidebar-section">
+                    <h3 class="sidebar-title">Materias</h3>
+                    <nav class="subject-nav" id="subject-nav">
+                        <button class="btn-subject active" data-subject="Matemáticas">Matemáticas</button>
+                        <button class="btn-subject" data-subject="Lenguaje">Lenguaje</button>
+                        <button class="btn-subject" data-subject="Ciencias Naturales">C. Naturales</button>
+                        <button class="btn-subject" data-subject="Ciencias Sociales">C. Sociales</button>
+                        <button class="btn-subject" data-subject="Inglés">Inglés</button>
+                    </nav>
+                </div>
+            </aside>
+            <main class="dashboard-content">
+                <div id="content-loader" class="loader-container" style="display: none;">
+                    <div class="spinner"></div><p>Cargando módulo...</p>
+                </div>
+                
+                <div id="module-container">
+                    <div id="lessons-wrapper" style="display: flex; flex-direction: column; gap: 1.5rem;">
+                        <!-- Las tarjetas de clases se inyectarán aquí -->
+                    </div>
+                    
+                    <section class="exam-section card" style="margin-top: 2rem;">
+                        <div class="card__header" style="text-align: left; margin-bottom: 1.5rem;">
+                            <h2 class="card__title">Examen Final del Periodo</h2>
+                        </div>
+                        <div id="exam-container"></div>
+                    </section>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- VISTA 4: ESPACIO DE TRABAJO STAFF (ADMIN/DOCENTE) -->
+    <div id="view-staff-dashboard" class="app-view dashboard-layout">
+        
+        <!-- HEADER LIMPIO (Sin colores en línea) -->
+        <header class="dashboard-header">
+            <div class="header-brand">
+                <span class="brand-badge">Workspace Institucional</span>
+                <h1 id="staff-role-display" class="header-title">Rol: Cargando...</h1>
+            </div>
+            
+            <div style="display: flex; gap: 1rem; align-items: center;">
+                <button onclick="app.toggleDarkMode()" class="btn btn--outline btn--sm" style="border-radius: 50%; padding: 0.4rem 0.6rem; font-size: 1.1rem; border-color: transparent;" title="Cambiar Tema">🌙</button>
+                <button id="btn-logout-staff" class="btn btn--outline btn--sm">Cerrar Sesión</button>
+            </div>
+        </header>
+
+        <div class="dashboard-container">
+            <aside class="dashboard-sidebar" style="width: 240px;">
+                <nav class="subject-nav">
+                    <button class="btn-subject active" onclick="app.switchStaffTab('tab-llaves')">🔑 Llaves y Accesos</button>
+                    <button class="btn-subject" onclick="app.switchStaffTab('tab-notas')">📊 Calificaciones</button>
+                    <button id="nav-publish" class="btn-subject" onclick="app.switchStaffTab('tab-publicar')">📝 Publicar Contenido</button>
+                    <button id="nav-personal" class="btn-subject" onclick="app.switchStaffTab('tab-personal')">👥 Gestión de Personal</button>
+                </nav>
+            </aside>
+
+            <!-- MAIN CONTENT LIMPIO (Sin fondo en línea) -->
+            <main class="dashboard-content">
+                
+                <!-- TAB 1: LLAVES -->
+                <div id="tab-llaves" class="staff-tab active">
+                    <section class="card card--wide" style="max-width: 100%;">
+                        <h2 id="admin-form-title" class="card__title" style="margin-bottom: 1.5rem;">Generador de Llaves</h2>
+                        <div id="admin-alert" class="alert"></div>
+                        <form id="admin-form" style="display: flex; gap: 1rem; align-items: flex-end; margin-bottom: 2rem;">
+                            <input type="hidden" id="edit-student-id" value="">
+                            
+                            <div class="form-group" style="flex: 2; margin: 0;">
+                                <label class="form-label">Estudiante</label>
+                                <input type="text" id="student-name" class="form-input" required>
+                            </div>
+                            <div class="form-group" style="flex: 1; margin: 0;">
+                                <label class="form-label">Grado</label>
+                                <select id="student-grade" class="form-select" required>
+                                    <option value="1">Grado 1°</option><option value="2">Grado 2°</option>
+                                    <option value="3">Grado 3°</option><option value="4">Grado 4°</option>
+                                    <option value="5">Grado 5°</option><option value="6">Grado 6°</option>
+                                    <option value="7">Grado 7°</option><option value="8">Grado 8°</option>
+                                    <option value="9">Grado 9°</option><option value="10">Grado 10°</option>
+                                    <option value="11">Grado 11°</option>
+                                </select>
+                            </div>
+                            <div style="display: flex; gap: 0.5rem; flex: 1;">
+                                <button type="button" id="btn-cancel-student-edit" class="btn btn--outline" style="display: none; padding: 0.5rem;">Cancelar</button>
+                                <button type="submit" id="btn-generate" class="btn btn--primary" style="flex: 1;">Generar</button>
+                            </div>
+                        </form>
+
+                        <div style="border-top: 1px solid var(--border-color); margin-top: 3rem; padding-top: 2rem;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 1rem;">
+                                <h3 class="card__title" style="margin:0;">Directorio de Estudiantes</h3>
+                                <span style="color: var(--text-muted); font-size: 0.85rem; background: var(--bg-main); padding: 0.3rem 0.8rem; border-radius: 99px; border: 1px solid var(--border-color);">
+                                    Total: <strong id="total-students-count" style="color: var(--text-primary);">0</strong>
+                                </span>
+                            </div>
+                            
+                            <!-- BÚSQUEDA LIMPIA (Sin fondos blancos forzados) -->
+                            <div style="display: flex; gap: 1rem; align-items: center; background: var(--bg-main); padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; border: 1px solid var(--border-color); flex-wrap: wrap;">
+                                <input type="text" id="search-student" class="form-input" placeholder="🔍 Buscar por nombre, apellido o token..." style="flex: 2; min-width: 200px; margin: 0;">
+                                <select id="filter-student-grade" class="form-select" style="flex: 1; min-width: 130px; margin: 0;">
+                                    <option value="">📚 Todos los Grados</option>
+                                    <option value="1">Grado 1°</option><option value="2">Grado 2°</option>
+                                    <option value="3">Grado 3°</option><option value="4">Grado 4°</option>
+                                    <option value="5">Grado 5°</option><option value="6">Grado 6°</option>
+                                    <option value="7">Grado 7°</option><option value="8">Grado 8°</option>
+                                    <option value="9">Grado 9°</option><option value="10">Grado 10°</option>
+                                    <option value="11">Grado 11°</option>
+                                </select>
+                                <select id="filter-student-status" class="form-select" style="flex: 1; min-width: 130px; margin: 0;">
+                                    <option value="">⚙️ Todos los Estados</option>
+                                    <option value="true">✅ Cuentas Activas</option>
+                                    <option value="false">⏸️ Cuentas Inactivas</option>
+                                </select>
+                            </div>
+                            
+                            <div class="table-container" style="margin: 0; border: none; padding: 0;">
+                                <table class="data-table">
+                                    <thead><tr><th>Token</th><th>Estudiante</th><th>Grado</th><th style="text-align: right;">Acción</th></tr></thead>
+                                    <tbody id="recent-tokens-tbody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <!-- TAB 2: NOTAS -->
+                <div id="tab-notas" class="staff-tab">
+                    <section class="card card--wide" style="max-width: 100%;">
+                        <h2 class="card__title" style="margin-bottom: 0.5rem;">Centro de Calificaciones</h2>
+                        <p class="card__subtitle" style="margin-bottom: 2rem;">Filtra, busca, grafica y exporta el rendimiento de tus estudiantes.</p>
+                        
+                        <div class="content-manager-layout">
+                            <aside class="filter-sidebar">
+                                <form id="filter-form" style="display: flex; flex-direction: column; gap: 1rem;">
+                                    <div class="filter-card">
+                                        <h4>📚 Grado</h4>
+                                        <select id="filter-grade" class="form-select" required>
+                                            <option value="" disabled selected>Selecciona un grado</option>
+                                            <option value="1">Grado 1°</option><option value="2">Grado 2°</option>
+                                            <option value="3">Grado 3°</option><option value="4">Grado 4°</option>
+                                            <option value="5">Grado 5°</option><option value="6">Grado 6°</option>
+                                            <option value="7">Grado 7°</option><option value="8">Grado 8°</option>
+                                            <option value="9">Grado 9°</option><option value="10">Grado 10°</option>
+                                            <option value="11">Grado 11°</option>
+                                        </select>
+                                    </div>
+                                    <div class="filter-card">
+                                        <h4>📅 Periodo</h4>
+                                        <select id="filter-period" class="form-select" required>
+                                            <option value="1">Periodo 1</option><option value="2">Periodo 2</option><option value="3">Periodo 3</option>
+                                        </select>
+                                    </div>
+                                    <div class="filter-card">
+                                        <h4>📖 Materia</h4>
+                                        <select id="filter-subject" class="form-select" required>
+                                            <option value="Matemáticas">Matemáticas</option><option value="Lenguaje">Lenguaje</option>
+                                            <option value="Ciencias Naturales">C. Naturales</option><option value="Ciencias Sociales">C. Sociales</option>
+                                            <option value="Inglés">Inglés</option>
+                                        </select>
+                                    </div>
+                                    <button type="submit" id="btn-search" class="btn btn--primary" style="width: 100%;">Cargar Notas</button>
+                                </form>
+                            </aside>
+
+                            <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+                                
+                                <div id="charts-wrapper" style="display: none; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem;">
+                                    <div class="filter-card" style="display: flex; flex-direction: column; align-items: center;">
+                                        <h4 style="align-self: flex-start;">Rendimiento del Salón</h4>
+                                        <div style="width: 100%; max-width: 250px;"><canvas id="chart-pass-fail"></canvas></div>
+                                    </div>
+                                    <div class="filter-card" style="display: flex; flex-direction: column; justify-content: center;">
+                                        <h4 style="align-self: flex-start;">Distribución de Notas</h4>
+                                        <div style="width: 100%;"><canvas id="chart-distribution"></canvas></div>
+                                    </div>
+                                </div>
+
+                                <div style="display: flex; gap: 1rem; align-items: center; background: var(--bg-main); padding: 1rem; border-radius: 8px; border: 1px solid var(--border-color); flex-wrap: wrap;">
+                                    <input type="text" id="search-grade-student" class="form-input" placeholder="🔍 Buscar estudiante por nombre o token..." style="flex: 2; min-width: 200px; margin: 0;" disabled>
+                                    
+                                    <span style="color: var(--text-muted); font-size: 0.85rem; padding: 0.5rem 1rem; border-radius: 8px; border: 1px solid var(--border-color); display: flex; gap: 0.5rem; align-items: center; background: var(--bg-card);">
+                                        📊 Promedio: <strong id="average-grade-count" style="color: var(--primary); font-size: 1.05rem;">0.0</strong>
+                                    </span>
+
+                                    <button type="button" id="btn-export" class="btn btn--outline" style="display: none; color: #059669; border-color: #34d399; background: var(--bg-card);">
+                                        ⬇️ Exportar CSV
+                                    </button>
+                                </div>
+
+                                <div class="table-container" style="margin: 0; border: none; padding: 0;">
+                                    <table class="data-table">
+                                        <thead><tr><th>Estudiante</th><th style="text-align: center;">Nota Final</th><th style="text-align: right;">Fecha de Entrega</th></tr></thead>
+                                        <tbody id="grades-tbody">
+                                            <tr><td colspan="3" style="text-align:center; color: var(--text-muted); padding: 2.5rem;">Selecciona el grado, periodo y materia en los filtros laterales para cargar las calificaciones del salón.</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <!-- TAB 3: PUBLICAR -->
+                <div id="tab-publicar" class="staff-tab">
+                    <section class="card card--wide" style="max-width: 100%;">
+                        <h2 id="publish-form-title" class="card__title" style="margin-bottom: 1.5rem;">Publicador de Contenido</h2>
+                        <div id="publish-alert" class="alert"></div>
+                        <form id="publish-form">
+                            <input type="hidden" id="edit-content-id" value="">
+                            
+                            <div style="display: flex; gap: 1rem; margin-bottom: 1rem;">
+                                <select id="pub-grade" class="form-select">
+                                    <option value="1">Grado 1°</option><option value="2">Grado 2°</option>
+                                    <option value="3">Grado 3°</option><option value="4">Grado 4°</option>
+                                    <option value="5">Grado 5°</option><option value="6">Grado 6°</option>
+                                    <option value="7">Grado 7°</option><option value="8">Grado 8°</option>
+                                    <option value="9">Grado 9°</option><option value="10">Grado 10°</option>
+                                    <option value="11">Grado 11°</option>
+                                </select>
+                                <select id="pub-period" class="form-select"><option value="1">P 1</option><option value="2">P 2</option><option value="3">P 3</option></select>
+                                <select id="pub-subject" class="form-select">
+                                    <option value="Matemáticas">Matemáticas</option><option value="Lenguaje">Lenguaje</option>
+                                    <option value="Ciencias Naturales">C. Naturales</option><option value="Ciencias Sociales">C. Sociales</option>
+                                    <option value="Inglés">Inglés</option>
+                                </select>
+                            </div>
+                            <input type="text" id="pub-title" class="form-input" placeholder="Título de la Clase (Ej: Suma de Fraccionarios)" style="margin-bottom: 1rem;" required>
+                            <textarea id="pub-html" class="form-input" rows="4" placeholder="Contenido (HTML/YouTube/PDF)" style="margin-bottom: 2rem;" required></textarea>
+                            
+                            <h3 class="form-label">Examen Final del Periodo (Opcional)</h3>
+                            <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 1rem;">Agregar preguntas aquí actualizará la evaluación final unificada para este grado, periodo y materia.</p>
+                            
+                            <div id="questions-container"></div>
+                            <button type="button" id="btn-add-question" class="btn btn--outline" style="margin-bottom: 1.5rem;">+ Añadir Pregunta al Examen</button>
+                            <div style="display:flex; gap:1rem;">
+                                <button type="button" id="btn-cancel-edit" class="btn btn--outline" style="display:none; color:var(--text-muted);">Cancelar Edición</button>
+                                <button type="submit" id="btn-submit-publish" class="btn btn--primary" style="flex:1;">Publicar Clase</button>
+                            </div>
+                        </form>
+
+                        <div style="border-top: 1px solid var(--border-color); margin-top: 3rem; padding-top: 2rem;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+                                <h3 class="card__title" style="margin:0;">Contenido Publicado</h3>
+                                <span style="color: var(--text-muted); font-size: 0.85rem;">Ordenado por última modificación</span>
+                            </div>
+
+                            <div class="content-manager-layout">
+                                <aside class="filter-sidebar">
+                                    <button type="button" id="btn-clear-filters" class="btn btn--outline" style="width: 100%; color: var(--error); border-color: rgba(239,68,68,0.2);">🗑️ Limpiar filtros</button>
+                                    <div class="filter-card">
+                                        <h4>📚 Grado</h4>
+                                        <select id="filter-manager-grade" class="form-select">
+                                            <option value="">Todos los grados</option>
+                                            <option value="1">Grado 1°</option><option value="2">Grado 2°</option>
+                                            <option value="3">Grado 3°</option><option value="4">Grado 4°</option>
+                                            <option value="5">Grado 5°</option><option value="6">Grado 6°</option>
+                                            <option value="7">Grado 7°</option><option value="8">Grado 8°</option>
+                                            <option value="9">Grado 9°</option><option value="10">Grado 10°</option>
+                                            <option value="11">Grado 11°</option>
+                                        </select>
+                                    </div>
+                                    <div class="filter-card">
+                                        <h4>📅 Periodo</h4>
+                                        <select id="filter-manager-period" class="form-select">
+                                            <option value="">Todos los periodos</option>
+                                            <option value="1">Periodo 1</option><option value="2">Periodo 2</option><option value="3">Periodo 3</option>
+                                        </select>
+                                    </div>
+                                    <div class="filter-card">
+                                        <h4>📖 Materia</h4>
+                                        <select id="filter-manager-subject" class="form-select">
+                                            <option value="">Todas las materias</option>
+                                            <option value="Matemáticas">Matemáticas</option><option value="Lenguaje">Lenguaje</option>
+                                            <option value="Ciencias Naturales">C. Naturales</option><option value="Ciencias Sociales">C. Sociales</option>
+                                            <option value="Inglés">Inglés</option>
+                                        </select>
+                                    </div>
+                                </aside>
+
+                                <div class="table-container" style="margin: 0; padding: 0; border: none;">
+                                    <table class="data-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Clase</th>
+                                                <th>Grado/Periodo</th>
+                                                <th>Modificación</th>
+                                                <th style="text-align: right;">Acciones</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="published-content-tbody">
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div> 
+
+                <!-- TAB 4: PERSONAL -->
+                <div id="tab-personal" class="staff-tab">
+                    <section class="card card--wide" style="max-width: 100%;">
+                        <h2 id="personal-form-title" class="card__title" style="margin-bottom: 0.5rem;">Gestión de Personal Institucional</h2>
+                        <p class="card__subtitle" style="margin-bottom: 2rem;">Crea y administra los accesos para otros docentes o directivos.</p>
+                        
+                        <div id="personal-alert" class="alert"></div>
+                        <form id="personal-form" style="display: flex; gap: 1rem; align-items: flex-end; margin-bottom: 2rem; background: var(--bg-main); padding: 1.5rem; border-radius: 8px;">
+                            <input type="hidden" id="edit-personal-id" value="">
+                            
+                            <div class="form-group" style="flex: 2; margin: 0;">
+                                <label class="form-label">Nombre Completo</label>
+                                <input type="text" id="staff-new-name" class="form-input" placeholder="Ej: Profe Juan" required>
+                            </div>
+                            <div class="form-group" style="flex: 1; margin: 0;">
+                                <label class="form-label">Rol Institucional</label>
+                                <select id="staff-new-role" class="form-select" required>
+                                    <option value="docente">Docente</option>
+                                    <option value="admin">Administrador</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="flex: 1; margin: 0;">
+                                <label class="form-label">PIN de Acceso</label>
+                                <input type="text" id="staff-new-pin" class="form-input" placeholder="Ej: 2026" minlength="4" maxlength="8" required>
+                            </div>
+                            <div style="display: flex; gap: 0.5rem; flex: 1;">
+                                <button type="button" id="btn-cancel-personal-edit" class="btn btn--outline" style="display: none; padding: 0.5rem;">Cancelar</button>
+                                <button type="submit" id="btn-add-staff" class="btn btn--primary" style="flex: 1;">Añadir</button>
+                            </div>
+                        </form>
+
+                        <div style="border-top: 1px solid var(--border-color); margin-top: 3rem; padding-top: 2rem;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 1rem;">
+                                <h3 class="card__title" style="margin:0;">Directorio de Personal</h3>
+                                <span style="color: var(--text-muted); font-size: 0.85rem; background: var(--bg-main); padding: 0.3rem 0.8rem; border-radius: 99px; border: 1px solid var(--border-color);">
+                                    Total: <strong id="total-staff-count" style="color: var(--text-primary);">0</strong>
+                                </span>
+                            </div>
+                            
+                            <div style="display: flex; gap: 1rem; align-items: center; background: var(--bg-main); padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; border: 1px solid var(--border-color); flex-wrap: wrap;">
+                                <input type="text" id="search-staff" class="form-input" placeholder="🔍 Buscar por nombre o PIN..." style="flex: 2; min-width: 200px; margin: 0;">
+                                <select id="filter-staff-role" class="form-select" style="flex: 1; min-width: 150px; margin: 0;">
+                                    <option value="">⚙️ Todos los Roles</option>
+                                    <option value="admin">🛡️ Administradores</option>
+                                    <option value="docente">👨‍🏫 Docentes</option>
+                                </select>
+                            </div>
+                            
+                            <div class="table-container" style="margin: 0; border: none; padding: 0;">
+                                <table class="data-table">
+                                    <thead>
+                                        <tr><th>Nombre</th><th>Rol</th><th>PIN Actual</th><th style="text-align: right;">Zona de Riesgo</th></tr>
+                                    </thead>
+                                    <tbody id="personal-tbody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </section>
+                </div> 
+            </main>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
